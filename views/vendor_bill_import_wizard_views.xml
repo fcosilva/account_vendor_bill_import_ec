@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<odoo>
+    <delete id="action_vendor_bill_import_wizard" model="ir.actions.act_window"/>
+    <delete id="menu_vendor_bill_import_wizard" model="ir.ui.menu"/>
+
+    <record id="view_vendor_bill_import_wizard_form" model="ir.ui.view">
+        <field name="name">vendor.bill.import.wizard.form</field>
+        <field name="model">vendor.bill.import.wizard</field>
+        <field name="arch" type="xml">
+            <form string="Import Vendor Bill XML">
+                <group>
+                    <field name="file_name"/>
+                    <field name="file_data" filename="file_name" required="1"/>
+                </group>
+                <footer>
+                    <button name="action_import" type="object" class="btn-primary" string="Import"/>
+                    <button string="Cancel" class="btn-secondary" special="cancel"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+</odoo>

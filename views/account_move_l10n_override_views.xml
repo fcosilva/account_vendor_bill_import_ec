@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<odoo>
+    <record id="view_move_form_l10n_ec_auth_not_required_import" model="ir.ui.view">
+        <field name="name">account.move.form.l10n.ec.auth.not.required.import</field>
+        <field name="model">account.move</field>
+        <field name="inherit_id" ref="l10n_ec_account_edi.view_move_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//field[@name='l10n_ec_electronic_authorization']" position="attributes">
+                <attribute name="required">False</attribute>
+            </xpath>
+        </field>
+    </record>
+</odoo>
