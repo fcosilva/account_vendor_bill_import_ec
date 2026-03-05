@@ -225,8 +225,9 @@ class VendorBillImportWizard(models.TransientModel):
 
         return {
             "supplier_vat": supplier_vat,
-            "supplier_name": metadata.get("supplier_name")
+            "supplier_name": self._extract_supplier_name_from_pdf_with_vat(text, supplier_vat)
             or ride.get("supplier_name")
+            or metadata.get("supplier_name")
             or self._extract_supplier_name_from_pdf(text)
             or supplier_vat,
             "invoice_date": invoice_date,
@@ -1265,14 +1266,26 @@ class VendorBillImportWizard(models.TransientModel):
         for label in re.finditer(r"R\.?\s*U\.?\s*C\.?\s*:", text, flags=re.IGNORECASE):
             area = text[label.end() : label.end() + 320]
 
-            # 1) try direct compact capture right after label
+            # 1) Exact 13-digit token immediately after the R.U.C. label.
+            for token in re.finditer(r"(?<!\d)(\d{13})(?!\d)", area):
+                candidate = token.group(1)
+                if candidate != company_vat and self._is_valid_ec_ruc(candidate):
+                    return candidate
+
+            # 2) If broken by separators/spaces, normalize nearby groups.
+            for token in re.finditer(r"((?:\d\D*){13})", area):
+                candidate = self._digits(token.group(1))
+                if len(candidate) == 13 and candidate != company_vat and self._is_valid_ec_ruc(candidate):
+                    return candidate
+
+            # 3) Compact capture fallback.
             direct = re.search(r"((?:\d[\s\.\-]*){13,35})", area)
             if direct:
                 ruc = self._normalize_ec_ruc(direct.group(1), exclude_values=[company_vat])
                 if ruc:
                     return ruc
 
-            # 2) robust for concatenated digits: scan every 13-digit window
+            # 4) Last resort for concatenated noisy chunks.
             area_digits = self._digits(area)
             for idx in range(0, max(0, len(area_digits) - 12)):
                 candidate = area_digits[idx : idx + 13]
@@ -1285,11 +1298,53 @@ class VendorBillImportWizard(models.TransientModel):
         return ""
 
     def _extract_supplier_name_by_label(self, text):
+        # Common SRI RIDE header:
+        # NÚMERO DE AUTORIZACIÓN
+        # <49 digits>
+        # <SUPPLIER NAME>
+        auth_header = re.search(
+            r"N[ÚU]MERO\s+DE\s+AUTORIZACI[ÓO]N[\s:\-]*([\s\S]{0,280})",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if auth_header:
+            block = auth_header.group(1)
+            lines = [re.sub(r"\s+", " ", (ln or "").strip()) for ln in block.splitlines()]
+            lines = [ln for ln in lines if ln]
+            # Skip authorization digits line(s), then take the first clean text line as supplier.
+            for line in lines:
+                digits = self._digits(line)
+                if digits and len(digits) >= 35:
+                    continue
+                upper = line.upper()
+                if any(
+                    token in upper
+                    for token in ("DIRECCION", "MATRIZ", "SUCURSAL", "OBLIGADO", "AMBIENTE", "EMISION")
+                ):
+                    continue
+                if re.search(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]", line) and len(line) >= 5:
+                    return line.strip(" -:")
+
         match = re.search(
             r"\n\s*([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{5,120}?)\s+FECHA\s+Y\s+HORA\s+DE\s+AUTORIZACI[ÓO]N",
             text,
             flags=re.IGNORECASE,
         )
+        if not match:
+            return ""
+        return re.sub(r"\s+", " ", match.group(1)).strip(" -:")
+
+    def _extract_supplier_name_from_pdf_with_vat(self, text, supplier_vat):
+        """Extract supplier legal name from compact RIDE text using supplier RUC as anchor."""
+        vat = self._digits(supplier_vat)
+        if not vat:
+            return ""
+        pattern = (
+            rf"{re.escape(vat)}\s*"
+            r"([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{4,180}?)"
+            r"(?=Calle:|Direcci[óo]n|Dirección|Raz[oó]n\s+Social\s*/\s*Nombres|OBLIGADO|AMBIENTE|EMISI[ÓO]N|$)"
+        )
+        match = re.search(pattern, text, flags=re.IGNORECASE)
         if not match:
             return ""
         return re.sub(r"\s+", " ", match.group(1)).strip(" -:")
