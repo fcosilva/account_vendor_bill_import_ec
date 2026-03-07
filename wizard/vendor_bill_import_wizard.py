@@ -3,6 +3,8 @@ import binascii
 import io
 import json
 import re
+import shutil
+import subprocess
 import xml.etree.ElementTree as ET
 from datetime import datetime
 import unicodedata
@@ -168,9 +170,15 @@ class VendorBillImportWizard(models.TransientModel):
         extracted = self._build_pdf_extraction_json(metadata=metadata, ride=ride, text=text)
 
         # Supplier RUC must come from explicit R.U.C. label mapping.
+        raw_supplier_vat = extracted.get("supplier_vat")
         supplier_vat = self._normalize_ec_ruc(
-            extracted.get("supplier_vat"), exclude_values=[self.env.company.vat]
+            raw_supplier_vat, exclude_values=[self.env.company.vat]
         )
+        if not supplier_vat:
+            fallback_digits = self._digits(raw_supplier_vat)
+            company_vat = self._digits(self.env.company.vat)
+            if len(fallback_digits) == 13 and fallback_digits != company_vat:
+                supplier_vat = fallback_digits
         number = extracted.get("invoice_number")
         authorization = extracted.get("authorization")
         missing = []
@@ -941,6 +949,10 @@ class VendorBillImportWizard(models.TransientModel):
     def _find_or_create_partner(self, vat, name):
         vat_digits = self._normalize_ec_ruc(vat)
         if not vat_digits:
+            fallback_digits = self._digits(vat)
+            if len(fallback_digits) == 13:
+                vat_digits = fallback_digits
+        if not vat_digits:
             raise UserError(
                 _(
                     "Could not determine a valid 13-digit supplier RUC from the imported file."
@@ -949,12 +961,14 @@ class VendorBillImportWizard(models.TransientModel):
         partner = self.env["res.partner"].search(
             [
                 ("company_id", "in", [False, self.env.company.id]),
-                ("vat", "=", vat_digits),
+                ("vat", "ilike", vat_digits),
             ],
             limit=1,
         )
         if partner:
-            if self._normalize_ec_ruc(partner.vat) != vat_digits:
+            partner_vat_digits = self._digits(partner.vat)
+            partner_vat_normalized = self._normalize_ec_ruc(partner.vat)
+            if partner_vat_normalized != vat_digits and partner_vat_digits != vat_digits:
                 partner = False
             elif partner.vat != vat_digits:
                 try:
@@ -1156,6 +1170,22 @@ class VendorBillImportWizard(models.TransientModel):
         )
 
     def _extract_text_from_pdf(self, pdf_bytes):
+        pdftotext_bin = shutil.which("pdftotext")
+        if pdftotext_bin:
+            try:
+                proc = subprocess.run(
+                    [pdftotext_bin, "-", "-"],
+                    input=pdf_bytes,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=True,
+                )
+                text = proc.stdout.decode("utf-8", "ignore").replace("\xa0", " ")
+                if text.strip():
+                    return text
+            except Exception:
+                pass
+
         try:
             if PdfReader:
                 reader = PdfReader(io.BytesIO(pdf_bytes))
@@ -1264,18 +1294,18 @@ class VendorBillImportWizard(models.TransientModel):
     def _extract_supplier_ruc_by_label(self, text):
         company_vat = self._digits(self.env.company.vat)
         for label in re.finditer(r"R\.?\s*U\.?\s*C\.?\s*:", text, flags=re.IGNORECASE):
-            area = text[label.end() : label.end() + 320]
+            area = text[label.end() : label.end() + 520]
 
             # 1) Exact 13-digit token immediately after the R.U.C. label.
             for token in re.finditer(r"(?<!\d)(\d{13})(?!\d)", area):
                 candidate = token.group(1)
-                if candidate != company_vat and self._is_valid_ec_ruc(candidate):
+                if candidate != company_vat:
                     return candidate
 
             # 2) If broken by separators/spaces, normalize nearby groups.
             for token in re.finditer(r"((?:\d\D*){13})", area):
                 candidate = self._digits(token.group(1))
-                if len(candidate) == 13 and candidate != company_vat and self._is_valid_ec_ruc(candidate):
+                if len(candidate) == 13 and candidate != company_vat:
                     return candidate
 
             # 3) Compact capture fallback.
@@ -1342,7 +1372,7 @@ class VendorBillImportWizard(models.TransientModel):
         pattern = (
             rf"{re.escape(vat)}\s*"
             r"([A-ZÁÉÍÓÚÜÑ][A-ZÁÉÍÓÚÜÑ\s]{4,180}?)"
-            r"(?=Calle:|Direcci[óo]n|Dirección|Raz[oó]n\s+Social\s*/\s*Nombres|OBLIGADO|AMBIENTE|EMISI[ÓO]N|$)"
+            r"(?=Barrio:|Calle:|Direcci[óo]n|Dirección|Raz[oó]n\s+Social\s*/\s*Nombres|OBLIGADO|AMBIENTE|EMISI[ÓO]N|$)"
         )
         match = re.search(pattern, text, flags=re.IGNORECASE)
         if not match:
@@ -1422,12 +1452,13 @@ class VendorBillImportWizard(models.TransientModel):
                 if digits:
                     return digits
 
-        # Fallback: first 13-digit token in issuer section (before customer section).
+        # Fallback: first valid 13-digit token in issuer section (before customer section).
         for match in re.finditer(r"(?<!\d)\d{13}(?!\d)", pre_customer_text):
             digits = match.group(0)
             if company_vat and digits == company_vat:
                 continue
-            return digits
+            if self._is_valid_ec_ruc(digits):
+                return digits
         return ""
 
     def _extract_invoice_number_from_pdf(self, text):
