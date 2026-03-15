@@ -1,0 +1,139 @@
+# Translation for Odoo Server.
+# This file contains the translation of the following modules:
+# 	* account_vendor_bill_import_ec
+msgid ""
+msgstr ""
+"Project-Id-Version: Odoo Server 17.0\n"
+"POT-Creation-Date: 2026-03-15 00:00+0000\n"
+"PO-Revision-Date: 2026-03-15 00:00+0000\n"
+"Last-Translator: OpenLab\n"
+"Language-Team: Spanish (Ecuador)\n"
+"Language: es_EC\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+
+#. module: account_vendor_bill_import_ec
+#: model:ir.actions.act_window,name:account_vendor_bill_import_ec.view_vendor_bill_import_wizard_form
+#: model:ir.model.fields,field_description:account_vendor_bill_import_ec.field_account_bank_statement_line__action_open_vendor_bill_import_wizard
+#: model:ir.model.fields,field_description:account_vendor_bill_import_ec.field_account_move__action_open_vendor_bill_import_wizard
+#: model:ir.model.fields,field_description:account_vendor_bill_import_ec.field_account_payment__action_open_vendor_bill_import_wizard
+#: model_terms:ir.ui.view,arch_db:account_vendor_bill_import_ec.view_move_form_vendor_bill_import_ec
+#: model_terms:ir.ui.view,arch_db:account_vendor_bill_import_ec.view_vendor_bill_import_wizard_form
+msgid "Import XML/PDF"
+msgstr "Importar XML/PDF"
+
+#. module: account_vendor_bill_import_ec
+#: model:ir.model.fields,field_description:account_vendor_bill_import_ec.field_vendor_bill_import_wizard__file_data
+msgid "XML/PDF File"
+msgstr "Archivo XML/PDF"
+
+#. module: account_vendor_bill_import_ec
+#: model:ir.model.fields,field_description:account_vendor_bill_import_ec.field_vendor_bill_import_wizard__file_name
+msgid "Filename"
+msgstr "Nombre de archivo"
+
+#. module: account_vendor_bill_import_ec
+#: model_terms:ir.ui.view,arch_db:account_vendor_bill_import_ec.view_vendor_bill_import_wizard_form
+msgid "Import"
+msgstr "Importar"
+
+#. module: account_vendor_bill_import_ec
+#: model_terms:ir.ui.view,arch_db:account_vendor_bill_import_ec.view_vendor_bill_import_wizard_form
+msgid "Cancel"
+msgstr "Cancelar"
+
+#. module: account_vendor_bill_import_ec
+#: model:ir.model.fields,field_description:account_vendor_bill_import_ec.field_res_company__customer_invoice_import_journal_id
+#: model:ir.model.fields,field_description:account_vendor_bill_import_ec.field_res_config_settings__customer_invoice_import_journal_id
+#: model_terms:ir.ui.view,arch_db:account_vendor_bill_import_ec.res_config_settings_view_form_vendor_bill_import_ec
+msgid "Customer Invoice Import Journal"
+msgstr "Diario de importacion de facturas de cliente"
+
+#. module: account_vendor_bill_import_ec
+#: model:ir.model.fields,help:account_vendor_bill_import_ec.field_res_company__customer_invoice_import_journal_id
+msgid "Preferred sales journal used when importing XML/PDF into customer invoices. It must be a sales journal without EDI formats."
+msgstr "Diario de ventas preferido para importar XML/PDF en facturas de cliente. Debe ser un diario de ventas sin formatos EDI."
+
+#. module: account_vendor_bill_import_ec
+#: model_terms:ir.ui.view,arch_db:account_vendor_bill_import_ec.res_config_settings_view_form_vendor_bill_import_ec
+msgid "Preferred journal used by XML/PDF import on customer invoices."
+msgstr "Diario preferido para la importacion XML/PDF en facturas de cliente."
+
+#. module: account_vendor_bill_import_ec
+#: model_terms:ir.ui.view,arch_db:account_vendor_bill_import_ec.res_config_settings_view_form_vendor_bill_import_ec
+msgid "Must be a sales journal without EDI formats."
+msgstr "Debe ser un diario de ventas sin formatos EDI."
+
+#. module: account_vendor_bill_import_ec
+msgid "Only XML or PDF files are supported."
+msgstr "Solo se admiten archivos XML o PDF."
+
+#. module: account_vendor_bill_import_ec
+msgid "Invalid XML file."
+msgstr "Archivo XML invalido."
+
+#. module: account_vendor_bill_import_ec
+msgid "Invalid PDF file."
+msgstr "Archivo PDF invalido."
+
+#. module: account_vendor_bill_import_ec
+msgid "XML does not contain a valid SRI invoice structure."
+msgstr "El XML no contiene una estructura valida de factura SRI."
+
+#. module: account_vendor_bill_import_ec
+msgid "Customer identification was not found in the XML or is not valid."
+msgstr "No se encontro la identificacion del cliente en el XML o no es valida."
+
+#. module: account_vendor_bill_import_ec
+msgid "Could not extract issuer RUC from SRI PDF. Please import the XML."
+msgstr "No se pudo extraer el RUC del emisor desde el PDF SRI. Importe el XML."
+
+#. module: account_vendor_bill_import_ec
+msgid "Could not extract a valid customer identification from SRI PDF. Please verify the PDF content or import the XML."
+msgstr "No se pudo extraer una identificacion valida del cliente desde el PDF SRI. Verifique el contenido del PDF o importe el XML."
+
+#. module: account_vendor_bill_import_ec
+msgid "No sales journal without EDI formats is available for this import. Please configure one and try again."
+msgstr "No hay un diario de ventas sin formatos EDI disponible para esta importacion. Configure uno e intente de nuevo."
+
+#. module: account_vendor_bill_import_ec
+msgid "Configured customer import journal %(journal)s does not belong to company %(company)s."
+msgstr "El diario configurado para importacion de clientes %(journal)s no pertenece a la compania %(company)s."
+
+#. module: account_vendor_bill_import_ec
+msgid "Configured customer import journal %(journal)s is not a sales journal."
+msgstr "El diario configurado para importacion de clientes %(journal)s no es un diario de ventas."
+
+#. module: account_vendor_bill_import_ec
+msgid "Configured customer import journal %(journal)s has active EDI formats. Select one without EDI formats in settings."
+msgstr "El diario configurado para importacion de clientes %(journal)s tiene formatos EDI activos. Seleccione uno sin EDI en ajustes."
+
+#. module: account_vendor_bill_import_ec
+msgid "The customer invoice import journal must belong to company %(company)s."
+msgstr "El diario de importacion de facturas de cliente debe pertenecer a la compania %(company)s."
+
+#. module: account_vendor_bill_import_ec
+msgid "The customer invoice import journal must be a sales journal."
+msgstr "El diario de importacion de facturas de cliente debe ser un diario de ventas."
+
+#. module: account_vendor_bill_import_ec
+msgid "The customer invoice import journal cannot have active EDI formats."
+msgstr "El diario de importacion de facturas de cliente no puede tener formatos EDI activos."
+
+#. module: account_vendor_bill_import_ec
+msgid "To import XML/PDF on customer invoices, open a draft customer invoice first."
+msgstr "Para importar XML/PDF en facturas de cliente, primero abra una factura de cliente en borrador."
+
+#. module: account_vendor_bill_import_ec
+msgid "Complete Customer Data"
+msgstr "Completar datos del cliente"
+
+#. module: account_vendor_bill_import_ec
+msgid "Imported from SRI PDF"
+msgstr "Importado desde PDF SRI"
+
+#. module: account_vendor_bill_import_ec
+msgid "Imported XML line"
+msgstr "Linea importada desde XML"

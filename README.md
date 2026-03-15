@@ -1,125 +1,100 @@
 # account_vendor_bill_import_ec
 
-Importación de facturas de proveedor para Ecuador (SRI) en Odoo 17.
+Importacion de comprobantes SRI (XML/PDF) para Odoo 17.
 
-Permite cargar facturas de proveedor desde:
+Este modulo permite importar documentos electronicos a facturas en borrador desde el propio formulario de `account.move`.
+
+## Alcance funcional
+
+Soporta importacion en:
+- Facturas de proveedor: `in_invoice`, `in_refund`
+- Facturas de cliente: `out_invoice`, `out_refund`
+
+Formatos soportados:
 - XML SRI (`.xml`)
-- RIDE PDF oficial con texto seleccionable (`.pdf`, no escaneado)
+- RIDE PDF con texto seleccionable (`.pdf`, no escaneado)
 
-## Objetivo
+## Flujo de uso
 
-Evitar digitación manual de facturas de compra y reducir errores de captura.
+1. Abrir una factura en borrador.
+2. Clic en `Import XML/PDF`.
+3. Subir archivo XML o PDF.
+4. Confirmar importacion.
+
+Nota: el wizard se abre desde el boton del formulario (no desde menu independiente).
+
+## Comportamiento por tipo de factura
+
+### Factura de proveedor
+
+- Busca/crea proveedor por RUC.
+- Carga fecha, numero de documento, autorizacion, forma de pago SRI, moneda y lineas.
+- Valida duplicados por proveedor + numero + autorizacion.
+- Si detecta duplicado, abre el comprobante existente.
+
+### Factura de cliente
+
+- Verifica que el emisor del XML/PDF coincida con el RUC de la compania.
+- Extrae identificacion del cliente (RUC, cedula o identificacion extranjera).
+- Busca cliente por identificacion; si no existe, lo crea.
+- Si crea un cliente nuevo, abre popup `Complete Customer Data` para terminar de editarlo.
+- No fija secuencia/nombre al importar en borrador, para permitir cambio de diario antes de publicar.
+
+## Configuracion
+
+En `Ajustes > Contabilidad > Invoicing Settings`:
+- `Customer Invoice Import Journal`
+
+Reglas del diario configurado:
+- Debe pertenecer a la compania activa.
+- Debe ser de tipo ventas.
+- No debe tener formatos EDI activos.
+
+Si no se configura, el modulo busca automaticamente un diario de ventas sin EDI.
+
+## Extraccion desde PDF
+
+Prioridad de extraccion:
+1. Metadata estructurada del PDF (DocumentInfo / AcroForm / XMP)
+2. Campos RIDE por etiquetas
+3. Fallback por texto (`pdftotext` con `-layout`)
+
+Puntos importantes:
+- No usa OCR.
+- En facturas de cliente, toma identificacion del bloque de datos del cliente y valida RUC emisor en cabecera.
+- La descripcion de linea prioriza extraccion por tabla RIDE y deja parser compacto como ultimo fallback.
+
+## Extraccion desde XML
+
+Admite:
+- `<factura>` directo
+- `<autorizacion>/<comprobante>` embebido
+
+Campos base:
+- `infoTributaria`
+- `infoFactura`
+- `detalles/detalle`
+
+## Debug y trazabilidad
+
+En importaciones PDF adjunta en chatter:
+- Archivo original importado
+- `*.debug.json` con `metadata`, `ride` y `extracted`
 
 ## Dependencias
 
-Módulos requeridos:
 - `account`
 - `product`
 - `l10n_ec`
 - `l10n_ec_account_edi`
 
-## Instalación / actualización
+## Instalacion / actualizacion
 
 ```bash
 docker-compose run --rm web-dev odoo -d openlab-dev -u account_vendor_bill_import_ec --stop-after-init
 docker-compose restart web-dev
 ```
 
-## Dónde usarlo
+## Licencia
 
-En una factura de proveedor en borrador:
-1. Ir a `Contabilidad > Proveedores > Facturas`.
-2. Abrir una factura borrador (`Factura de proveedor` o `Nota de crédito de proveedor`).
-3. Clic en botón `Import XML/PDF`.
-4. Subir archivo y clic en `Import`.
-
-Nota:
-- Se mantiene solo esta vía (botón en formulario). No se usa menú separado.
-
-## Qué campos llena
-
-Campos principales en `account.move`:
-- `Proveedor` (por RUC, creando partner si no existe)
-- `Fecha de factura`
-- `Número de Documento`
-- `Referencia de factura`
-- `Autorización electrónica`
-- `Forma de pago (SRI)` (si se detecta)
-- Líneas de factura (descripción, subtotal, impuestos según lo inferido)
-
-## Regla de duplicados
-
-La importación valida duplicado por combinación:
-- RUC del proveedor
-- Número de documento
-- Número de autorización
-
-Si ya existe, abre la factura existente en lugar de crear otra.
-
-## Enfoque de extracción PDF
-
-Prioridad de extracción:
-1. Metadata estructurada del PDF (DocumentInfo / AcroForm / XMP)
-2. Campos RIDE por etiquetas
-3. Fallback por texto del PDF
-
-Importante:
-- Para RUC se prioriza la etiqueta `R.U.C.`.
-- Para número de documento se prioriza `No.` del RIDE.
-- No usa OCR.
-
-## Enfoque de extracción XML
-
-Se espera XML SRI de factura en esquema offline, incluyendo:
-- `<factura>` directo, o
-- `<autorizacion>/<comprobante>` embebido
-
-Nodos principales usados:
-- `infoTributaria`
-- `infoFactura`
-- `detalles/detalle`
-
-Mapeo principal:
-- `infoTributaria/ruc` -> RUC proveedor
-- `infoTributaria/estab + ptoEmi + secuencial` -> número de documento
-- `numeroAutorizacion` / `claveAcceso` -> autorización electrónica
-- `infoFactura/fechaEmision` -> fecha de factura
-- `pagos/pago/formaPago` -> forma de pago SRI
-- `detalles/detalle` -> líneas de factura
-
-Validaciones XML:
-- Estructura mínima SRI válida.
-- RUC proveedor válido (13 dígitos).
-- Fecha de emisión interpretable.
-- Al menos una línea de detalle.
-- Coincidencia de identificación comprador vs VAT de la compañía cuando aplica.
-
-## Debug de importación (PDF)
-
-En cada importación PDF se adjuntan en el chatter de la factura:
-- PDF original importado
-- Archivo `*.debug.json` con:
-  - `metadata`
-  - `ride`
-  - `extracted`
-
-Esto permite auditar qué valor se tomó para cada campo.
-
-## Errores comunes
-
-- `Could not extract required fields from SRI PDF...`
-  - El PDF no contiene metadata/campos esperados o no es un RIDE oficial usable.
-
-- `The PDF has no readable text...`
-  - El archivo es imagen/escaneo sin capa de texto.
-
-- `A bill already exists for this supplier...`
-  - El comprobante ya fue registrado.
-
-- `Si su tipo de identificación es RUC, debe tener 13 dígitos`
-  - El RUC extraído no es válido o está incompleto.
-
-## Alcance actual
-
-- Enfocado en facturas de proveedor SRI.
-- El parser está optimizado para RIDE oficial; formatos PDF no estándar pueden requerir ajustes.
+AGPL-3. Ver archivo `LICENSE`.
