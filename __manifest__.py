@@ -16,6 +16,7 @@
         "views/vendor_bill_import_wizard_views.xml",
         "views/account_move_views.xml",
         "views/account_move_l10n_override_views.xml",
+        "views/res_config_settings_views.xml",
     ],
     "installable": True,
     "application": False,

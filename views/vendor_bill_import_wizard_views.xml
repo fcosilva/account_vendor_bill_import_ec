@@ -7,7 +7,7 @@
         <field name="name">vendor.bill.import.wizard.form</field>
         <field name="model">vendor.bill.import.wizard</field>
         <field name="arch" type="xml">
-            <form string="Import Vendor Bill XML">
+            <form string="Import XML/PDF">
                 <group>
                     <field name="file_name"/>
                     <field name="file_data" filename="file_name" required="1"/>

@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<odoo>
+    <record id="res_config_settings_view_form_vendor_bill_import_ec" model="ir.ui.view">
+        <field name="name">res.config.settings.view.form.vendor.bill.import.ec</field>
+        <field name="model">res.config.settings</field>
+        <field name="inherit_id" ref="account.res_config_settings_view_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//block[@id='invoicing_settings']" position="inside">
+                <setting
+                    id="customer_invoice_import_journal_setting"
+                    string="Customer Invoice Import Journal"
+                    company_dependent="1"
+                    help="Preferred journal used by XML/PDF import on customer invoices."
+                >
+                    <field
+                        name="customer_invoice_import_journal_id"
+                        options="{'no_create': True, 'no_open': False}"
+                    />
+                    <div class="text-muted">
+                        Must be a sales journal without EDI formats.
+                    </div>
+                </setting>
+            </xpath>
+        </field>
+    </record>
+</odoo>

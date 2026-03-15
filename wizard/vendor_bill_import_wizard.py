@@ -23,11 +23,13 @@ class VendorBillImportWizard(models.TransientModel):
     _name = "vendor.bill.import.wizard"
     _description = "Vendor Bill XML Import Wizard"
 
-    file_data = fields.Binary(string="XML File", required=True)
+    file_data = fields.Binary(string="XML/PDF File", required=True)
     file_name = fields.Char(string="Filename")
 
     def action_import(self):
         self.ensure_one()
+        import_move_type = self._get_import_move_type()
+        self = self.with_context(import_target_move_type=import_move_type)
         file_name = (self.file_name or "").lower()
         is_pdf = file_name.endswith(".pdf")
         is_xml = file_name.endswith(".xml")
@@ -46,10 +48,11 @@ class VendorBillImportWizard(models.TransientModel):
             attachment_name = self.file_name or "supplier_invoice.xml"
             source_label = "XML"
 
+        next_action = False
         try:
-            move = self._create_or_update_bill(bill_data)
+            move, next_action = self._create_or_update_bill(bill_data)
         except Exception as err:
-            if "13 dígitos" in str(err or ""):
+            if not self._is_customer_import() and "13 dígitos" in str(err or ""):
                 raise UserError(
                     _(
                         "Vendor bill import interceptor: extracted supplier RUC %(vat)s. "
@@ -69,14 +72,25 @@ class VendorBillImportWizard(models.TransientModel):
             mimetype=attachment_mimetype,
             source_label=source_label,
         )
+        if next_action:
+            return next_action
         return {
             "type": "ir.actions.act_window",
-            "name": _("Vendor Bill"),
+            "name": _("Invoice"),
             "res_model": "account.move",
             "res_id": move.id,
             "view_mode": "form",
             "target": "current",
         }
+
+    def _is_customer_import(self):
+        return self.env.context.get("import_target_move_type") in ("out_invoice", "out_refund")
+
+    def _get_import_move_type(self):
+        forced_move = self._get_forced_target_move()
+        if forced_move:
+            return forced_move.move_type
+        return "in_invoice"
 
     def _decode_xml_file(self):
         try:
@@ -85,6 +99,8 @@ class VendorBillImportWizard(models.TransientModel):
             raise UserError(_("Invalid file encoding.")) from err
 
     def _extract_bill_data(self, xml_bytes):
+        if self._is_customer_import():
+            return self._extract_customer_invoice_data(xml_bytes)
         try:
             root = ET.fromstring(xml_bytes)
         except ET.ParseError as err:
@@ -163,11 +179,198 @@ class VendorBillImportWizard(models.TransientModel):
             "amount_total_xml": total_amount,
         }
 
+    def _extract_customer_invoice_data(self, xml_bytes):
+        try:
+            root = ET.fromstring(xml_bytes)
+        except ET.ParseError as err:
+            raise UserError(_("Invalid XML file.")) from err
+
+        factura_root, authorization = self._get_factura_root(root)
+        info_tributaria = self._child(factura_root, "infoTributaria")
+        info_factura = self._child(factura_root, "infoFactura")
+        detalles = self._child(factura_root, "detalles")
+        if not info_tributaria or not info_factura or not detalles:
+            raise UserError(_("XML does not contain a valid SRI invoice structure."))
+
+        issuer_vat = self._normalize_ec_ruc(self._text(info_tributaria, "ruc"))
+        company_vat = self._normalize_ec_ruc(self.env.company.vat)
+        if issuer_vat and company_vat and issuer_vat != company_vat:
+            raise ValidationError(
+                _(
+                    "XML issuer RUC (%(issuer)s) does not match company VAT (%(company)s).",
+                    issuer=issuer_vat,
+                    company=company_vat,
+                )
+            )
+
+        estab = self._text(info_tributaria, "estab")
+        pto_emi = self._text(info_tributaria, "ptoEmi")
+        secuencial = self._text(info_tributaria, "secuencial")
+        number = "-".join(filter(None, [estab, pto_emi, secuencial]))
+        access_key = self._text(info_tributaria, "claveAcceso")
+        authorization = self._resolve_authorization_number(
+            xml_root=root,
+            factura_root=factura_root,
+            parsed_authorization=authorization,
+            parsed_access_key=access_key,
+        )
+        if not authorization:
+            raise UserError(
+                _(
+                    "No electronic authorization number was found in the XML. "
+                    "Expected one of: numeroAutorizacion, claveAcceso, claveAccesoConsultada."
+                )
+            )
+
+        invoice_date = self._parse_ec_date(self._text(info_factura, "fechaEmision"))
+        if not invoice_date:
+            raise UserError(_("Could not determine invoice date from XML."))
+        currency = self._resolve_currency(self._text(info_factura, "moneda"))
+        sri_payment_id = self._extract_sri_payment_from_xml(info_factura)
+        customer_id_type_code = self._text(info_factura, "tipoIdentificacionComprador")
+        customer_vat = self._normalize_ec_customer_identification(
+            self._text(info_factura, "identificacionComprador")
+        )
+        if not customer_vat:
+            raise UserError(
+                _(
+                    "Customer identification was not found in the XML or is not valid."
+                )
+            )
+
+        lines = []
+        for detail in list(detalles):
+            if not self._tag(detail).endswith("detalle"):
+                continue
+            lines.append(self._extract_line_vals(detail))
+        if not lines:
+            raise UserError(_("No invoice lines were found in the XML."))
+
+        total_amount = self._float(self._text(info_factura, "importeTotal"))
+
+        return {
+            "supplier_vat": customer_vat,
+            "supplier_name": self._text(info_factura, "razonSocialComprador") or customer_vat,
+            "invoice_date": invoice_date,
+            "number": number,
+            "authorization": authorization,
+            "sri_payment_id": sri_payment_id,
+            "currency_id": currency.id if currency else False,
+            "line_vals": lines,
+            "amount_total_xml": total_amount,
+            "customer_identification_type_code": customer_id_type_code,
+        }
+
     def _extract_bill_data_from_pdf(self, pdf_bytes):
         metadata = self._extract_pdf_structured_data(pdf_bytes)
         text = self._extract_text_from_pdf(pdf_bytes)
         ride = self._extract_ride_fields_from_pdf(text)
         extracted = self._build_pdf_extraction_json(metadata=metadata, ride=ride, text=text)
+        number = extracted.get("invoice_number")
+        authorization = extracted.get("authorization")
+        invoice_date = extracted.get("invoice_date")
+        if not invoice_date:
+            raise UserError(_("Could not determine invoice date from PDF."))
+
+        subtotal = extracted.get("subtotal")
+        total_amount = extracted.get("total_amount")
+        if not total_amount:
+            total_amount = self._extract_global_total_amount(text)
+        if not total_amount:
+            total_amount = subtotal
+        if not subtotal:
+            subtotal = total_amount
+        if not subtotal:
+            raise UserError(_("Could not determine invoice totals from PDF."))
+
+        if self._is_customer_import():
+            forced_move = self._get_forced_target_move()
+            if not forced_move:
+                raise UserError(
+                    _(
+                        "To import XML/PDF on customer invoices, open a draft customer invoice first."
+                    )
+                )
+            issuer_vat = ""
+            for raw_issuer in (
+                extracted.get("supplier_vat"),
+                self._extract_supplier_ruc_by_label(text, exclude_company=False),
+                self._extract_supplier_vat_from_pdf(text, exclude_company=False),
+            ):
+                issuer_vat = self._normalize_ec_ruc(raw_issuer)
+                if issuer_vat:
+                    break
+            company_vat = self._normalize_ec_ruc(self.env.company.vat)
+            if not issuer_vat:
+                raise UserError(
+                    _("Could not extract issuer RUC from SRI PDF. Please import the XML.")
+                )
+            if company_vat and issuer_vat != company_vat:
+                raise ValidationError(
+                    _(
+                        "PDF issuer RUC (%(issuer)s) does not match company VAT (%(company)s).",
+                        issuer=issuer_vat,
+                        company=company_vat,
+                    )
+                )
+            customer_vat = self._normalize_ec_customer_identification(
+                extracted.get("customer_vat") or self._extract_customer_vat_by_label(text)
+            )
+            if not customer_vat:
+                raise UserError(
+                    _(
+                        "Could not extract a valid customer identification from SRI PDF. "
+                        "Please verify the PDF content or import the XML."
+                    )
+                )
+            missing = []
+            if not number:
+                missing.append(_("invoice number"))
+            if not authorization:
+                missing.append(_("electronic authorization"))
+            if missing:
+                raise UserError(
+                    _(
+                        "Could not extract required fields from SRI PDF: %(missing)s. "
+                        "Please verify the PDF content or import the XML.",
+                        missing=", ".join(missing),
+                    )
+                )
+            line_description = extracted.get("line_description") or _("Imported from SRI PDF")
+            line_vals = {
+                "name": line_description,
+                "product_id": self._get_fallback_product(line_description).id,
+                "quantity": 1.0,
+                "price_unit": subtotal,
+                "discount": 0.0,
+            }
+            tax_ids = []
+            tax_rate = self._compute_tax_rate(subtotal, total_amount)
+            if tax_rate > 0:
+                tax = self._map_tax(codigo="", codigo_porcentaje="", tarifa=tax_rate)
+                if tax:
+                    tax_ids = [tax.id]
+            if tax_ids:
+                line_vals["tax_ids"] = [(6, 0, tax_ids)]
+            return {
+                "supplier_vat": customer_vat,
+                "supplier_name": extracted.get("customer_name")
+                or self._extract_customer_name_by_label(text)
+                or customer_vat,
+                "invoice_date": invoice_date,
+                "number": self._normalize_doc_number(number),
+                "authorization": authorization,
+                "sri_payment_id": extracted.get("sri_payment_id"),
+                "currency_id": self.env.company.currency_id.id,
+                "line_vals": [line_vals],
+                "amount_total_xml": total_amount,
+                "debug_payload": {
+                    "source": "pdf",
+                    "metadata": metadata,
+                    "ride": ride,
+                    "extracted": extracted,
+                },
+            }
 
         # Supplier RUC must come from explicit R.U.C. label mapping.
         raw_supplier_vat = extracted.get("supplier_vat")
@@ -179,8 +382,6 @@ class VendorBillImportWizard(models.TransientModel):
             company_vat = self._digits(self.env.company.vat)
             if len(fallback_digits) == 13 and fallback_digits != company_vat:
                 supplier_vat = fallback_digits
-        number = extracted.get("invoice_number")
-        authorization = extracted.get("authorization")
         missing = []
         if not supplier_vat:
             missing.append(_("supplier RUC"))
@@ -196,22 +397,6 @@ class VendorBillImportWizard(models.TransientModel):
                     missing=", ".join(missing),
                 )
             )
-
-        invoice_date = extracted.get("invoice_date")
-        if not invoice_date:
-            raise UserError(
-                _("Could not determine invoice date from PDF.")
-            )
-        subtotal = extracted.get("subtotal")
-        total_amount = extracted.get("total_amount")
-        if not total_amount:
-            total_amount = self._extract_global_total_amount(text)
-        if not total_amount:
-            total_amount = subtotal
-        if not subtotal:
-            subtotal = total_amount
-        if not subtotal:
-            raise UserError(_("Could not determine invoice totals from PDF."))
 
         tax_ids = []
         tax_rate = self._compute_tax_rate(subtotal, total_amount)
@@ -259,6 +444,12 @@ class VendorBillImportWizard(models.TransientModel):
             "supplier_vat": metadata.get("supplier_vat")
             or ride.get("supplier_vat")
             or self._extract_supplier_vat_from_pdf(text),
+            "customer_vat": metadata.get("customer_vat")
+            or ride.get("customer_vat")
+            or self._extract_customer_vat_by_label(text),
+            "customer_name": metadata.get("customer_name")
+            or ride.get("customer_name")
+            or self._extract_customer_name_by_label(text),
             # Prioritize RIDE metadata label "No." (item 2) over visual parsing.
             "invoice_number": metadata.get("invoice_number")
             or ride.get("invoice_number")
@@ -280,9 +471,9 @@ class VendorBillImportWizard(models.TransientModel):
             ),
             "line_description": metadata.get("line_description")
             or metadata.get("description")
-            or self._extract_line_description_from_compact_ride(text)
             or ride.get("line_description")
-            or self._extract_line_description_from_pdf(text),
+            or self._extract_line_description_from_pdf(text)
+            or self._extract_line_description_from_compact_ride(text),
             "sri_payment_id": metadata.get("sri_payment_id")
             or ride.get("sri_payment_id")
             or self._extract_sri_payment_from_pdf_text(text),
@@ -372,6 +563,33 @@ class VendorBillImportWizard(models.TransientModel):
         )
         if supplier_name:
             metadata["supplier_name"] = re.sub(r"\s+", " ", supplier_name).strip(" -:")
+
+        customer_vat = self._normalize_ec_customer_identification(
+            self._metadata_lookup(
+                pairs,
+                key_patterns=[
+                    r"IDENTIFICACION_COMPRADOR",
+                    r"RUC_COMPRADOR",
+                    r"IDENTIFICACION_CLIENTE",
+                    r"RUC_CLIENTE",
+                ],
+            )
+        )
+        if customer_vat:
+            metadata["customer_vat"] = customer_vat
+
+        customer_name = self._metadata_lookup(
+            pairs,
+            key_patterns=[
+                r"RAZON_SOCIAL_NOMBRES_Y_APELLIDOS",
+                r"NOMBRES_Y_APELLIDOS_COMPRADOR",
+                r"NOMBRE_CLIENTE",
+                r"CLIENTE",
+                r"COMPRADOR",
+            ],
+        )
+        if customer_name:
+            metadata["customer_name"] = re.sub(r"\s+", " ", customer_name).strip(" -:")
 
         invoice_date = self._extract_invoice_date_from_metadata_pairs(pairs)
         if invoice_date:
@@ -664,6 +882,9 @@ class VendorBillImportWizard(models.TransientModel):
         return line_vals
 
     def _create_or_update_bill(self, bill_data):
+        if self._is_customer_import():
+            return self._create_or_update_customer_invoice(bill_data)
+
         partner = self._find_or_create_partner(
             vat=bill_data["supplier_vat"], name=bill_data["supplier_name"]
         )
@@ -751,26 +972,86 @@ class VendorBillImportWizard(models.TransientModel):
                     bill_total=move.amount_total,
                 )
             )
-        return move
+        return move, False
+
+    def _create_or_update_customer_invoice(self, bill_data):
+        move = self._get_forced_target_move()
+        if not move or move.move_type not in ("out_invoice", "out_refund"):
+            raise UserError(
+                _(
+                    "To import XML/PDF on customer invoices, open a draft customer invoice first."
+                )
+            )
+
+        partner, created_partner = self._find_or_create_customer_partner(
+            vat=bill_data.get("supplier_vat"),
+            name=bill_data.get("supplier_name"),
+            identification_type_code=bill_data.get("customer_identification_type_code"),
+        )
+        move_vals = self._prepare_move_vals(partner, bill_data)
+        try:
+            move.invoice_line_ids = [(5, 0, 0)]
+            move.write(move_vals)
+            self._set_latam_document_number(move, bill_data.get("number"))
+        except (ValidationError, UserError) as err:
+            raise UserError(
+                _(
+                    "Customer invoice update failed. Matched partner: %(partner)s (VAT: %(partner_vat)s). "
+                    "Original error: %(error)s",
+                    partner=move.partner_id.display_name or "-",
+                    partner_vat=move.partner_id.vat or "-",
+                    error=str(err),
+                )
+            ) from err
+
+        xml_total = bill_data["amount_total_xml"]
+        if xml_total and abs(move.amount_total - xml_total) > 0.05:
+            move.message_post(
+                body=_(
+                    "Warning: XML/PDF total (%(xml_total).2f) differs from computed invoice total (%(bill_total).2f).",
+                    xml_total=xml_total,
+                    bill_total=move.amount_total,
+                )
+            )
+        next_action = self._build_customer_partner_edit_action(partner) if created_partner else False
+        return move, next_action
 
     def _prepare_move_vals(self, partner, bill_data):
         company = self.env.company
         latam_doc = self.env.ref("l10n_ec.ec_dt_01", raise_if_not_found=False)
-        journal = self.env["account.journal"].search(
-            [("type", "=", "purchase"), ("company_id", "=", company.id)], limit=1
-        )
+        move_type = self.env.context.get("import_target_move_type") or "in_invoice"
+        is_customer_move = move_type in ("out_invoice", "out_refund")
+        if is_customer_move:
+            journal = self._get_customer_import_journal(company)
+        else:
+            journal = self.env["account.journal"].search(
+                [("type", "=", "purchase"), ("company_id", "=", company.id)],
+                limit=1,
+            )
+        if not journal:
+            if is_customer_move:
+                raise UserError(
+                    _(
+                        "No sales journal without EDI formats is available for this import. "
+                        "Please configure one and try again."
+                    )
+                )
+            raise UserError(
+                _(
+                    "No purchase journal is available for this import. Please configure one and try again."
+                )
+            )
 
         vals = {
-            "move_type": "in_invoice",
+            "move_type": move_type,
             "partner_id": partner.id,
             "company_id": company.id,
             "invoice_date": bill_data["invoice_date"],
             "date": bill_data["invoice_date"],
             "invoice_line_ids": [(0, 0, line_vals) for line_vals in bill_data["line_vals"]],
             "ref": bill_data["number"],
+            "journal_id": journal.id,
         }
-        if journal:
-            vals["journal_id"] = journal.id
         if bill_data["currency_id"]:
             vals["currency_id"] = bill_data["currency_id"]
         if "l10n_latam_document_type_id" in self.env["account.move"]._fields and latam_doc:
@@ -787,9 +1068,48 @@ class VendorBillImportWizard(models.TransientModel):
             vals["l10n_ec_sri_payment_id"] = bill_data["sri_payment_id"]
         return vals
 
+    def _get_customer_import_journal(self, company):
+        configured_journal = company.customer_invoice_import_journal_id
+        if configured_journal:
+            if configured_journal.company_id != company:
+                raise UserError(
+                    _(
+                        "Configured customer import journal %(journal)s does not belong to company %(company)s.",
+                        journal=configured_journal.display_name,
+                        company=company.display_name,
+                    )
+                )
+            if configured_journal.type != "sale":
+                raise UserError(
+                    _(
+                        "Configured customer import journal %(journal)s is not a sales journal.",
+                        journal=configured_journal.display_name,
+                    )
+                )
+            if (
+                "edi_format_ids" in configured_journal._fields
+                and configured_journal.edi_format_ids
+            ):
+                raise UserError(
+                    _(
+                        "Configured customer import journal %(journal)s has active EDI formats. "
+                        "Select one without EDI formats in settings.",
+                        journal=configured_journal.display_name,
+                    )
+                )
+            return configured_journal
+
+        journal_domain = [("type", "=", "sale"), ("company_id", "=", company.id)]
+        if "edi_format_ids" in self.env["account.journal"]._fields:
+            journal_domain.append(("edi_format_ids", "=", False))
+        return self.env["account.journal"].search(journal_domain, limit=1)
+
     def _set_latam_document_number(self, move, number):
         """Persist document number through `name` because LATAM document number is computed from it."""
         if not move or not number:
+            return
+        # Customer imports must keep draft invoices without sequence so users can still change journal.
+        if move.move_type in ("out_invoice", "out_refund"):
             return
         if "l10n_latam_document_type_id" not in move._fields or not move.l10n_latam_document_type_id:
             return
@@ -815,13 +1135,15 @@ class VendorBillImportWizard(models.TransientModel):
             if (
                 forced_move
                 and forced_move.company_id == self.env.company
-                and forced_move.move_type in ("in_invoice", "in_refund")
+                and forced_move.move_type in ("in_invoice", "in_refund", "out_invoice", "out_refund")
                 and forced_move.state == "draft"
             ):
                 return forced_move
         return False
 
     def _recover_duplicate_move(self, err, bill_data):
+        if self._is_customer_import():
+            return False
         try:
             self.env.cr.rollback()
         except Exception:
@@ -1010,6 +1332,90 @@ class VendorBillImportWizard(models.TransientModel):
                 )
             ) from err
 
+    def _find_or_create_customer_partner(self, vat, name, identification_type_code=None):
+        normalized_identification = self._normalize_ec_customer_identification(vat)
+        if not normalized_identification:
+            raise UserError(
+                _(
+                    "Could not determine a valid customer identification from the imported file."
+                )
+            )
+        partner = self.env["res.partner"].search(
+            [
+                ("company_id", "in", [False, self.env.company.id]),
+                ("vat", "ilike", normalized_identification),
+            ],
+            limit=1,
+        )
+        if partner:
+            updates = {}
+            if partner.vat != normalized_identification:
+                updates["vat"] = normalized_identification
+            if "customer_rank" in partner._fields and partner.customer_rank < 1:
+                updates["customer_rank"] = 1
+            if updates:
+                partner.write(updates)
+            return partner, False
+
+        ident_type = self._resolve_customer_identification_type(
+            identification=normalized_identification,
+            sri_type_code=identification_type_code,
+        )
+        partner_vals = {
+            "name": name or normalized_identification,
+            "vat": normalized_identification,
+            "customer_rank": 1,
+            "country_id": self.env.ref("base.ec").id,
+        }
+        if ident_type and "l10n_latam_identification_type_id" in self.env["res.partner"]._fields:
+            partner_vals["l10n_latam_identification_type_id"] = ident_type.id
+        try:
+            partner = self.env["res.partner"].create(partner_vals)
+        except (ValidationError, UserError) as err:
+            raise UserError(
+                _(
+                    "Customer creation failed with identification '%(raw)s' (normalized '%(normalized)s'). "
+                    "Original error: %(error)s",
+                    raw=vat or "",
+                    normalized=normalized_identification,
+                    error=str(err),
+                )
+            ) from err
+        return partner, True
+
+    def _resolve_customer_identification_type(self, identification, sri_type_code=None):
+        identification = self._normalize_ec_customer_identification(identification)
+        code = (sri_type_code or "").strip()
+        ident_xmlid = False
+
+        if code == "04":
+            ident_xmlid = "l10n_ec.ec_ruc"
+        elif code == "05":
+            ident_xmlid = "l10n_ec.ec_dni"
+        elif code in ("06", "08"):
+            ident_xmlid = "l10n_ec.ec_passport"
+        elif identification.isdigit() and len(identification) == 13 and identification != "9999999999999":
+            if self._is_valid_ec_ruc(identification):
+                ident_xmlid = "l10n_ec.ec_ruc"
+        elif identification.isdigit() and len(identification) == 10:
+            if self._is_valid_ec_dni(identification):
+                ident_xmlid = "l10n_ec.ec_dni"
+
+        if not ident_xmlid:
+            return False
+        return self.with_context(active_test=False).env.ref(ident_xmlid, raise_if_not_found=False)
+
+    def _build_customer_partner_edit_action(self, partner):
+        return {
+            "type": "ir.actions.act_window",
+            "name": _("Complete Customer Data"),
+            "res_model": "res.partner",
+            "res_id": partner.id,
+            "view_mode": "form",
+            "target": "new",
+            "context": {"form_view_initial_mode": "edit"},
+        }
+
     def _find_product(self, code, description):
         product = False
         product_model = self.env["product.product"]
@@ -1066,7 +1472,8 @@ class VendorBillImportWizard(models.TransientModel):
     def _map_tax(self, codigo, codigo_porcentaje, tarifa):
         tax_model = self.env["account.tax"]
         company = self.env.company
-        domain = [("company_id", "=", company.id), ("type_tax_use", "=", "purchase")]
+        tax_use = "sale" if self._is_customer_import() else "purchase"
+        domain = [("company_id", "=", company.id), ("type_tax_use", "=", tax_use)]
 
         has_tax_code = "l10n_ec_xml_fe_code" in tax_model._fields
         has_group_code = "l10n_ec_xml_fe_code" in self.env["account.tax.group"]._fields
@@ -1155,8 +1562,19 @@ class VendorBillImportWizard(models.TransientModel):
                 }
             )
             attachment_ids.append(debug_attachment.id)
-        move.message_post(
-            body=_(
+        if self._is_customer_import():
+            body = _(
+                "Customer invoice imported from %(source_type)s.<br/>"
+                "Customer ID: %(ruc)s<br/>"
+                "Document number: %(number)s<br/>"
+                "Electronic authorization: %(authorization)s",
+                source_type=source_label,
+                ruc=bill_data.get("supplier_vat") or "-",
+                number=bill_data.get("number") or "-",
+                authorization=bill_data.get("authorization") or "-",
+            )
+        else:
+            body = _(
                 "Vendor bill imported from %(source_type)s.<br/>"
                 "Supplier RUC: %(ruc)s<br/>"
                 "Document number: %(number)s<br/>"
@@ -1165,16 +1583,15 @@ class VendorBillImportWizard(models.TransientModel):
                 ruc=bill_data.get("supplier_vat") or "-",
                 number=bill_data.get("number") or "-",
                 authorization=bill_data.get("authorization") or "-",
-            ),
-            attachment_ids=attachment_ids,
-        )
+            )
+        move.message_post(body=body, attachment_ids=attachment_ids)
 
     def _extract_text_from_pdf(self, pdf_bytes):
         pdftotext_bin = shutil.which("pdftotext")
         if pdftotext_bin:
             try:
                 proc = subprocess.run(
-                    [pdftotext_bin, "-", "-"],
+                    [pdftotext_bin, "-layout", "-", "-"],
                     input=pdf_bytes,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
@@ -1215,6 +1632,7 @@ class VendorBillImportWizard(models.TransientModel):
         fields_map = {}
 
         fields_map["supplier_vat"] = self._extract_supplier_ruc_by_label(text)
+        fields_map["customer_vat"] = self._extract_customer_vat_by_label(text)
 
         number = self._extract_value_after_label(
             text,
@@ -1232,6 +1650,9 @@ class VendorBillImportWizard(models.TransientModel):
         supplier_name = self._extract_supplier_name_by_label(text)
         if supplier_name:
             fields_map["supplier_name"] = supplier_name
+        customer_name = self._extract_customer_name_by_label(text)
+        if customer_name:
+            fields_map["customer_name"] = customer_name
 
         date_token = self._extract_value_after_label(
             text, r"\bFECHA\b", value_pattern=r"(\d{2}\s*[/-]\s*\d{2}\s*[/-]\s*\d{4})"
@@ -1291,7 +1712,7 @@ class VendorBillImportWizard(models.TransientModel):
                 return digits[:49] if len(digits) >= 49 else digits
         return ""
 
-    def _extract_supplier_ruc_by_label(self, text):
+    def _extract_supplier_ruc_by_label(self, text, exclude_company=True):
         company_vat = self._digits(self.env.company.vat)
         for label in re.finditer(r"R\.?\s*U\.?\s*C\.?\s*:", text, flags=re.IGNORECASE):
             area = text[label.end() : label.end() + 520]
@@ -1299,19 +1720,20 @@ class VendorBillImportWizard(models.TransientModel):
             # 1) Exact 13-digit token immediately after the R.U.C. label.
             for token in re.finditer(r"(?<!\d)(\d{13})(?!\d)", area):
                 candidate = token.group(1)
-                if candidate != company_vat:
+                if not (exclude_company and candidate == company_vat):
                     return candidate
 
             # 2) If broken by separators/spaces, normalize nearby groups.
             for token in re.finditer(r"((?:\d\D*){13})", area):
                 candidate = self._digits(token.group(1))
-                if len(candidate) == 13 and candidate != company_vat:
+                if len(candidate) == 13 and not (exclude_company and candidate == company_vat):
                     return candidate
 
             # 3) Compact capture fallback.
             direct = re.search(r"((?:\d[\s\.\-]*){13,35})", area)
             if direct:
-                ruc = self._normalize_ec_ruc(direct.group(1), exclude_values=[company_vat])
+                exclude_values = [company_vat] if exclude_company and company_vat else None
+                ruc = self._normalize_ec_ruc(direct.group(1), exclude_values=exclude_values)
                 if ruc:
                     return ruc
 
@@ -1321,10 +1743,76 @@ class VendorBillImportWizard(models.TransientModel):
                 candidate = area_digits[idx : idx + 13]
                 if (
                     candidate
-                    and candidate != company_vat
+                    and not (exclude_company and candidate == company_vat)
                     and self._is_valid_ec_ruc(candidate)
                 ):
                     return candidate
+        return ""
+
+    def _extract_customer_vat_by_label(self, text):
+        customer_anchor = re.search(
+            r"RAZ[ÓO]N\s+SOCIAL\s*/\s*NOMBRES\s+Y\s+APELLIDOS",
+            text,
+            flags=re.IGNORECASE,
+        )
+        area = text[customer_anchor.start() : customer_anchor.start() + 700] if customer_anchor else text
+
+        # Prefer values right after "Identificacion", and stop before common next labels.
+        for match in re.finditer(r"IDENTIFICACI[ÓO]N\s*[:\-]?\s*([^\n\r]{1,120})", area, flags=re.IGNORECASE):
+            raw_value = match.group(1) or ""
+            raw_value = re.split(
+                r"\b(FECHA|PLACA|MATR[IÍ]CULA|GUIA|DIRECCION)\b",
+                raw_value,
+                maxsplit=1,
+                flags=re.IGNORECASE,
+            )[0]
+
+            # First choice for Ecuador invoices: 10/13 digit identification near the label.
+            digit_candidate = re.search(r"(?<!\d)(\d{10,13})(?!\d)", raw_value)
+            if digit_candidate:
+                vat = self._normalize_ec_customer_identification(digit_candidate.group(1))
+                if vat:
+                    return vat
+
+            # Fallback for foreign IDs (alphanumeric) near the same label.
+            vat = self._normalize_ec_customer_identification(raw_value)
+            if vat:
+                return vat
+
+        for token in re.finditer(r"(?<![A-Za-z0-9])([A-Za-z0-9][A-Za-z0-9\.\-_/]{2,24})(?![A-Za-z0-9])", area):
+            candidate = self._normalize_ec_customer_identification(token.group(1))
+            if candidate:
+                return candidate
+        return ""
+
+    def _extract_customer_name_by_label(self, text):
+        customer_anchor = re.search(
+            r"RAZ[ÓO]N\s+SOCIAL\s*/\s*NOMBRES\s+Y\s+APELLIDOS",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if not customer_anchor:
+            return ""
+        area = text[customer_anchor.end() : customer_anchor.end() + 420]
+        inline = re.search(
+            r"^\s*([^\n]{3,180}?)(?=\s+IDENTIFICACI[ÓO]N|\s+FECHA|\n|$)",
+            area,
+            flags=re.IGNORECASE,
+        )
+        if inline:
+            candidate = re.sub(r"\s+", " ", inline.group(1)).strip(" -:")
+            if candidate and not re.fullmatch(r"[\d\W]+", candidate):
+                return candidate
+
+        lines = [re.sub(r"\s+", " ", (ln or "").strip()) for ln in area.splitlines()]
+        for line in lines:
+            if not line:
+                continue
+            upper = line.upper()
+            if "IDENTIFICACION" in upper or "FECHA" in upper:
+                continue
+            if re.search(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]", line) and len(line) >= 3:
+                return line.strip(" -:")
         return ""
 
     def _extract_supplier_name_by_label(self, text):
@@ -1432,7 +1920,7 @@ class VendorBillImportWizard(models.TransientModel):
             result.append(cleaned)
         return "\n".join(result).strip()
 
-    def _extract_supplier_vat_from_pdf(self, text):
+    def _extract_supplier_vat_from_pdf(self, text, exclude_company=True):
         company_vat = self._digits(self.env.company.vat)
         customer_anchor = re.search(
             r"RAZ[ÓO]N\s+SOCIAL\s*/\s*NOMBRES\s+Y\s+APELLIDOS|IDENTIFICACI[ÓO]N\s+\d{10,13}",
@@ -1448,14 +1936,15 @@ class VendorBillImportWizard(models.TransientModel):
         for pattern in patterns:
             match = re.search(pattern, pre_customer_text, flags=re.IGNORECASE)
             if match:
-                digits = self._normalize_ec_ruc(match.group(1), exclude_values=[company_vat])
+                exclude_values = [company_vat] if exclude_company and company_vat else None
+                digits = self._normalize_ec_ruc(match.group(1), exclude_values=exclude_values)
                 if digits:
                     return digits
 
         # Fallback: first valid 13-digit token in issuer section (before customer section).
         for match in re.finditer(r"(?<!\d)\d{13}(?!\d)", pre_customer_text):
             digits = match.group(0)
-            if company_vat and digits == company_vat:
+            if exclude_company and company_vat and digits == company_vat:
                 continue
             if self._is_valid_ec_ruc(digits):
                 return digits
@@ -1961,6 +2450,39 @@ class VendorBillImportWizard(models.TransientModel):
 
         return ""
 
+    def _normalize_ec_customer_identification(self, value, exclude_values=None):
+        normalized = re.sub(r"[^A-Za-z0-9]", "", (value or "").upper())
+        excluded = {
+            re.sub(r"[^A-Za-z0-9]", "", (v or "").upper())
+            for v in (exclude_values or [])
+            if v
+        }
+
+        def _valid(candidate):
+            if not candidate or candidate in excluded:
+                return False
+            # Customer imports must accept document values coming from external systems,
+            # including IDs that may not pass Ecuador checksum rules.
+            if candidate.isdigit() and len(candidate) in (10, 13):
+                return True
+            return bool(re.fullmatch(r"[A-Z0-9]{3,20}", candidate) and re.search(r"\d", candidate))
+
+        if _valid(normalized):
+            return normalized
+
+        text = value or ""
+        for match in re.finditer(r"(?<![A-Za-z0-9])([A-Za-z0-9][A-Za-z0-9\.\-_/ ]{2,29})(?![A-Za-z0-9])", text):
+            candidate = re.sub(r"[^A-Za-z0-9]", "", (match.group(1) or "").upper())
+            if _valid(candidate):
+                return candidate
+
+        for match in re.finditer(r"((?:[A-Za-z0-9]\D*){3,20})", text):
+            candidate = re.sub(r"[^A-Za-z0-9]", "", (match.group(1) or "").upper())
+            if _valid(candidate):
+                return candidate
+
+        return ""
+
     def _is_valid_ec_ruc(self, value):
         ruc = self._digits(value)
         if len(ruc) != 13:
@@ -2006,6 +2528,29 @@ class VendorBillImportWizard(models.TransientModel):
             return False
 
         return ruc[-3:] != "000"
+
+    def _is_valid_ec_dni(self, value):
+        dni = self._digits(value)
+        if len(dni) != 10:
+            return False
+        if dni[:2] == "00":
+            return False
+        province = int(dni[:2])
+        if province < 1 or (province > 24 and province != 30):
+            return False
+        third = int(dni[2])
+        if third > 5:
+            return False
+
+        coeffs = [2, 1, 2, 1, 2, 1, 2, 1, 2]
+        total = 0
+        for num, coef in zip(dni[:9], coeffs):
+            val = int(num) * coef
+            if val >= 10:
+                val -= 9
+            total += val
+        check = (10 - (total % 10)) % 10
+        return check == int(dni[9])
 
     def _normalize_doc_number(self, number):
         if not number:
